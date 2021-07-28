@@ -74,6 +74,7 @@ namespace IoT.WebAPI
                     });
             });
             services.AddScoped<IDevicesBlobStorageService, DevicesBlobStorageService>();
+            services.AddScoped<IDevicesBlobStorageServiceCache, DevicesBlobStorageServiceCache>();
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.

@@ -21,11 +21,11 @@ namespace IoT.Devices.Service.AzureBlobStorage
     {
         private readonly BlobServiceClient _blobServiceClient;
         private readonly IOptions<AzureBlobStorageAppSettings> _azureBlobStorageAppSettings;
-        private readonly IAppCache _cache;
+        private readonly IDevicesBlobStorageServiceCache _cache;
 
         public DevicesBlobStorageService(BlobServiceClient blobServiceClient,
             IOptions<AzureBlobStorageAppSettings> azureBlobStorageAppSettings,
-            IAppCache cache)
+            IDevicesBlobStorageServiceCache cache)
         {
             _blobServiceClient = blobServiceClient;
             _azureBlobStorageAppSettings = azureBlobStorageAppSettings;
@@ -34,7 +34,7 @@ namespace IoT.Devices.Service.AzureBlobStorage
 
         public async Task<MemoryStream> GetSensorMeasurementFileAsync(string deviceId, SensorType sensorType, DateTime measurementDate)
         {
-            var isSensorMeasurementCached = IsSensorMeasurementCached(deviceId, sensorType, measurementDate, out var sensorMeasurementCacheModel);
+            var isSensorMeasurementCached = _cache.IsSensorMeasurementCached(deviceId, sensorType, measurementDate, out var sensorMeasurementCacheModel);
             MemoryStream csvFileStream;
             var temporaryFileName = DeviceBlobStorageEncoder.EncodeTemporaryBlobFileName(deviceId, sensorType, measurementDate);
 
@@ -61,18 +61,19 @@ namespace IoT.Devices.Service.AzureBlobStorage
                         await temporaryFileBlobClient.DownloadToAsync(memoryStream);
                         csvFileStream = memoryStream;
                     }
-                    CreateCacheSensorMeasurement(deviceId, sensorType, measurementDate, SensorMeasurementExist.TemporaryFile, csvFileStream);
+                    _cache.CreateCacheSensorMeasurement(deviceId, sensorType, measurementDate, SensorMeasurementExist.TemporaryFile, csvFileStream);
                 }
                 else
                 {
                     var historicalFileName = DeviceBlobStorageEncoder.EncodeHistoricalBlobFileName(deviceId, sensorType);
                     var historicalFileBlobClient = container.GetBlobClient(historicalFileName);
+                    var isHistoricalFileExistsResponse = await historicalFileBlobClient.ExistsAsync();
 
-                    if (historicalFileBlobClient.Exists().Value)
+                    if (isHistoricalFileExistsResponse.Value)
                     {
                         using (var memoryStream = new MemoryStream())
                         {
-                            historicalFileBlobClient.DownloadTo(memoryStream);
+                            await historicalFileBlobClient.DownloadToAsync(memoryStream);
                             using (var measurementsArchiveReader = new MeasurementsArchiveReader(memoryStream))
                             {
                                 measurementsArchiveReader.ReadMeasurementStream(measurementDate);
@@ -80,22 +81,22 @@ namespace IoT.Devices.Service.AzureBlobStorage
                                 if (!isSensorMeasurementCached)
                                 {
                                     var measurementDateFileNamesToSkip = new List<string>()
-                                {
-                                    DeviceBlobStorageEncoder.EncodeTemporaryFileNameInsideHistoricalBlobFile(measurementDate)
-                                };
+                                    {
+                                        DeviceBlobStorageEncoder.EncodeTemporaryFileNameInsideHistoricalBlobFile(measurementDate)
+                                    };
                                     var distinctMeasurementDateFileNames = measurementsArchiveReader.MeasurementDateFileNames.Except(
                                         measurementDateFileNamesToSkip);
-                                    CreateCacheSensorMeasurementsFromHistoricalFile(deviceId, sensorType, distinctMeasurementDateFileNames);
+                                    _cache.CreateCacheSensorMeasurementsFromHistoricalFile(deviceId, sensorType, distinctMeasurementDateFileNames);
                                 }
                                 csvFileStream = measurementsArchiveReader.MeasurementCsvStream;
                             }
 
-                            UpdateCacheSensorMeasurement(deviceId, sensorType, measurementDate, SensorMeasurementExist.HistoricalFile, csvFileStream);
+                            _cache.UpdateCacheSensorMeasurement(deviceId, sensorType, measurementDate, SensorMeasurementExist.HistoricalFile, csvFileStream);
                         }
                     }
                     else
                     {
-                        CreateCacheSensorMeasurement(deviceId, sensorType, measurementDate, SensorMeasurementExist.None, null);
+                        _cache.CreateCacheSensorMeasurement(deviceId, sensorType, measurementDate, SensorMeasurementExist.None, null);
 
                         throw new ResourceNotFoundException(temporaryFileName.Replace(".csv", ""), "Device measurements");
                     }
@@ -105,76 +106,56 @@ namespace IoT.Devices.Service.AzureBlobStorage
             return csvFileStream;
         }
 
-        ///// <summary>
-        ///// 403, it's not available for me :/
-        ///// </summary>
-        ///// <param name="blobClient"></param>
-        //private void SetCache(BlobClient blobClient)
+        //private bool IsSensorMeasurementCached(string deviceId, SensorType sensorType, DateTime measurementDate,
+        //    out SensorMeasurementCacheModel sensorMeasurementCacheModel)
         //{
-        //    var blobHttpHeaders = new BlobHttpHeaders()
+        //    sensorMeasurementCacheModel = null;
+        //    var isCached = _cache.TryGetValue<SensorMeasurementCacheModel>(
+        //        DeviceBlobStorageServiceCacheKeys.GetSensorMeasurementsKey(deviceId, sensorType, measurementDate),
+        //        out var sensorMeasurementCacheModelBoxed);
+
+        //    if (isCached)
         //    {
-        //        CacheControl = "max-age=3600"
-        //    };
-        //    var response = blobClient.SetHttpHeaders(blobHttpHeaders);
+        //        sensorMeasurementCacheModel = (SensorMeasurementCacheModel)sensorMeasurementCacheModelBoxed;  
+        //    }
+
+        //    return isCached;
         //}
 
-        private bool IsSensorMeasurementCached(string deviceId, SensorType sensorType, DateTime measurementDate,
-            out SensorMeasurementCacheModel sensorMeasurementCacheModel)
-        {
-            sensorMeasurementCacheModel = null;
-            var isCached = _cache.TryGetValue<SensorMeasurementCacheModel>(
-                DeviceBlobStorageServiceCacheKeys.GetSensorMeasurementsKey(deviceId, sensorType, measurementDate),
-                out var sensorMeasurementCacheModelBoxed);
+        //private void CreateCacheSensorMeasurement(string deviceId, SensorType sensorType, DateTime measurementDate,
+        //    SensorMeasurementExist sensorMeasurementExist, MemoryStream sensorMeasurementStream)
+        //{
+        //    var cacheKey = DeviceBlobStorageServiceCacheKeys.GetSensorMeasurementsKey(deviceId, sensorType, measurementDate);
+        //    var sensorMeasurementCacheModel = new SensorMeasurementCacheModel(sensorMeasurementExist, sensorMeasurementStream?.ToArray());
+        //    _cache.Add(cacheKey, sensorMeasurementCacheModel, DeviceBlobStorageServiceCacheTimes.GenerateCacheTime());
+        //}
 
-            if (isCached)
-            {
-                sensorMeasurementCacheModel = (SensorMeasurementCacheModel)sensorMeasurementCacheModelBoxed;  
-            }
+        //private void UpdateCacheSensorMeasurement(string deviceId, SensorType sensorType, DateTime measurementDate,
+        //    SensorMeasurementExist sensorMeasurementExist, MemoryStream sensorMeasurementStream)
+        //{
+        //    var cacheKey = DeviceBlobStorageServiceCacheKeys.GetSensorMeasurementsKey(deviceId, sensorType, measurementDate);
+        //    var isAlreadyExistsInCache = _cache.TryGetValue<SensorMeasurementCacheModel>(cacheKey, out var sensorMeasurementCacheModelBoxed);
 
-            return isCached;
-        }
+        //    if (isAlreadyExistsInCache)
+        //    {
+        //        _cache.Remove(cacheKey);
+        //    }
 
-        private void CreateCacheSensorMeasurement(string deviceId, SensorType sensorType, DateTime measurementDate,
-            SensorMeasurementExist sensorMeasurementExist, MemoryStream sensorMeasurementStream)
-        {
-            var cacheKey = DeviceBlobStorageServiceCacheKeys.GetSensorMeasurementsKey(deviceId, sensorType, measurementDate);
-            var isAlreadyExistsInCache = _cache.TryGetValue<SensorMeasurementCacheModel>(cacheKey, out var sensorMeasurementCacheModelBoxed);
-            
-            if (isAlreadyExistsInCache)
-            {
-                _cache.Remove(cacheKey);
-            }
+        //    CreateCacheSensorMeasurement(deviceId, sensorType, measurementDate, sensorMeasurementExist, sensorMeasurementStream);
+        //}
 
-            var sensorMeasurementCacheModel = new SensorMeasurementCacheModel(sensorMeasurementExist, sensorMeasurementStream?.ToArray());
-            _cache.Add(cacheKey, sensorMeasurementCacheModel, DeviceBlobStorageServiceCacheTimes.GenerateCacheTime());
-        }
-
-        private void UpdateCacheSensorMeasurement(string deviceId, SensorType sensorType, DateTime measurementDate,
-            SensorMeasurementExist sensorMeasurementExist, MemoryStream sensorMeasurementStream)
-        {
-            var cacheKey = DeviceBlobStorageServiceCacheKeys.GetSensorMeasurementsKey(deviceId, sensorType, measurementDate);
-            var isAlreadyExistsInCache = _cache.TryGetValue<SensorMeasurementCacheModel>(cacheKey, out var sensorMeasurementCacheModelBoxed);
-
-            if (isAlreadyExistsInCache)
-            {
-                _cache.Remove(cacheKey);
-            }
-
-            CreateCacheSensorMeasurement(deviceId, sensorType, measurementDate, sensorMeasurementExist, sensorMeasurementStream);
-        }
-
-        private void CreateCacheSensorMeasurementsFromHistoricalFile(string deviceId, SensorType sensorType, 
-            IEnumerable<string> measurementDateFileNames)
-        {
-            foreach (var measurementDateFileName in measurementDateFileNames)
-            {
-                CreateCacheSensorMeasurement(
-                    deviceId,
-                    sensorType,
-                    DeviceBlobStorageDecoder.DecodeMeasurementDateFromTemporaryFileNameFromHistoricalBlobFile(measurementDateFileName),
-                    SensorMeasurementExist.HistoricalFile,
-                    null);
-            }
-        }
+        //private void CreateCacheSensorMeasurementsFromHistoricalFile(string deviceId, SensorType sensorType, 
+        //    IEnumerable<string> measurementDateFileNames)
+        //{
+        //    foreach (var measurementDateFileName in measurementDateFileNames)
+        //    {
+        //        CreateCacheSensorMeasurement(
+        //            deviceId,
+        //            sensorType,
+        //            DeviceBlobStorageDecoder.DecodeMeasurementDateFromTemporaryFileNameFromHistoricalBlobFile(measurementDateFileName),
+        //            SensorMeasurementExist.HistoricalFile,
+        //            null);
+        //    }
+        //}
     }
 }
