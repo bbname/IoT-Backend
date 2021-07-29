@@ -56,11 +56,9 @@ namespace IoT.Devices.Service.AzureBlobStorage
 
                 if (isTemporaryFileExistsResponse.Value)
                 {
-                    using (var memoryStream = new MemoryStream())
-                    {
-                        await temporaryFileBlobClient.DownloadToAsync(memoryStream);
-                        csvFileStream = memoryStream;
-                    }
+                    var memoryStream = new MemoryStream();
+                    await temporaryFileBlobClient.DownloadToAsync(memoryStream);
+                    csvFileStream = memoryStream;
                     _cache.CreateCacheSensorMeasurement(deviceId, sensorType, measurementDate, SensorMeasurementExist.TemporaryFile, csvFileStream);
                 }
                 else
